@@ -120,8 +120,10 @@ class TestServerStream extends ServerTransportStream {
 
 class ServerHarness extends _Harness {
   @override
-  ConnectionServer createServer() =>
-      Server(<Service>[service], <Interceptor>[interceptor]);
+  ConnectionServer createServer() => Server.create(
+        services: <Service>[service],
+        interceptors: <Interceptor>[interceptor],
+      );
 
   static ServiceMethod<int, int> createMethod(String name,
       Function methodHandler, bool clientStreaming, bool serverStreaming) {
@@ -155,7 +157,7 @@ abstract class _Harness {
 
   void setUp() {
     final stream = TestServerStream(toServer.stream, fromServer.sink);
-    server.serveStream_(stream);
+    server.serveStream_(stream: stream);
   }
 
   void tearDown() {

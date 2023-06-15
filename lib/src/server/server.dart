@@ -87,6 +87,7 @@ class ConnectionServer {
   final Map<String, Service> _services = {};
   final List<Interceptor> _interceptors;
   final CodecRegistry? _codecRegistry;
+  final GrpcErrorHandler? _errorHandler;
 
   final _connections = <ServerTransportConnection>[];
 
@@ -95,8 +96,10 @@ class ConnectionServer {
     List<Service> services, [
     List<Interceptor> interceptors = const <Interceptor>[],
     CodecRegistry? codecRegistry,
+    GrpcErrorHandler? errorHandler,
   ])  : _codecRegistry = codecRegistry,
-        _interceptors = interceptors {
+        _interceptors = interceptors,
+        _errorHandler = errorHandler {
     for (final service in services) {
       _services[service.$name] = service;
     }
@@ -104,14 +107,21 @@ class ConnectionServer {
 
   Service? lookupService(String service) => _services[service];
 
-  Future<void> serveConnection(ServerTransportConnection connection,
-      [X509Certificate? clientCertificate]) async {
+  Future<void> serveConnection({
+    required ServerTransportConnection connection,
+    X509Certificate? clientCertificate,
+    InternetAddress? remoteAddress,
+  }) async {
     _connections.add(connection);
-    ServerHandler_? handler;
+    ServerHandler? handler;
     // TODO(jakobr): Set active state handlers, close connection after idle
     // timeout.
     connection.incomingStreams.listen((stream) {
-      handler = serveStream_(stream, clientCertificate);
+      handler = serveStream_(
+        stream: stream,
+        clientCertificate: clientCertificate,
+        remoteAddress: remoteAddress,
+      );
     }, onError: (error, stackTrace) {
       if (error is Error) {
         Zone.current.handleUncaughtError(error, stackTrace);
@@ -127,12 +137,21 @@ class ConnectionServer {
   }
 
   @visibleForTesting
-  ServerHandler_ serveStream_(ServerTransportStream stream,
-      [X509Certificate? clientCertificate]) {
-    return ServerHandler_(
-      lookupService, stream, _interceptors, _codecRegistry,
+  ServerHandler serveStream_({
+    required ServerTransportStream stream,
+    X509Certificate? clientCertificate,
+    InternetAddress? remoteAddress,
+  }) {
+    return ServerHandler(
+      stream: stream,
+      serviceLookup: lookupService,
+      interceptors: _interceptors,
+      codecRegistry: _codecRegistry,
       // ignore: unnecessary_cast
-      clientCertificate as io_bits.X509Certificate?,
+      clientCertificate: clientCertificate as io_bits.X509Certificate?,
+      // ignore: unnecessary_cast
+      remoteAddress: remoteAddress as io_bits.InternetAddress?,
+      errorHandler: _errorHandler,
     )..handle();
   }
 }
@@ -145,11 +164,21 @@ class Server extends ConnectionServer {
   SecureServerSocket? _secureServer;
 
   /// Create a server for the given [services].
+  @Deprecated('use Server.create() instead')
   Server(
-    List<Service> services, [
+    super.services, [
+    super.interceptors,
+    super.codecRegistry,
+    super.errorHandler,
+  ]);
+
+  /// Create a server for the given [services].
+  Server.create({
+    required List<Service> services,
     List<Interceptor> interceptors = const <Interceptor>[],
     CodecRegistry? codecRegistry,
-  ]) : super(services, interceptors, codecRegistry);
+    GrpcErrorHandler? errorHandler,
+  }) : super(services, interceptors, codecRegistry, errorHandler);
 
   /// The port that the server is listening on, or `null` if the server is not
   /// active.
@@ -207,13 +236,23 @@ class Server extends ConnectionServer {
       if (socket.address.type != InternetAddressType.unix) {
         socket.setOption(SocketOption.tcpNoDelay, true);
       }
+
       X509Certificate? clientCertificate;
+
       if (socket is SecureSocket) {
         clientCertificate = socket.peerCertificate;
       }
-      final connection = ServerTransportConnection.viaSocket(socket,
-          settings: http2ServerSettings);
-      serveConnection(connection, clientCertificate);
+
+      final connection = ServerTransportConnection.viaSocket(
+        socket,
+        settings: http2ServerSettings,
+      );
+
+      serveConnection(
+        connection: connection,
+        clientCertificate: clientCertificate,
+        remoteAddress: socket.remoteAddress,
+      );
     }, onError: (error, stackTrace) {
       if (error is Error) {
         Zone.current.handleUncaughtError(error, stackTrace);
@@ -223,22 +262,28 @@ class Server extends ConnectionServer {
 
   @override
   @visibleForTesting
-  ServerHandler_ serveStream_(ServerTransportStream stream,
-      [X509Certificate? clientCertificate]) {
-    return ServerHandler_(
-      lookupService,
-      stream,
-      _interceptors,
-      _codecRegistry,
+  ServerHandler serveStream_({
+    required ServerTransportStream stream,
+    X509Certificate? clientCertificate,
+    InternetAddress? remoteAddress,
+  }) {
+    return ServerHandler(
+      stream: stream,
+      serviceLookup: lookupService,
+      interceptors: _interceptors,
+      codecRegistry: _codecRegistry,
       // ignore: unnecessary_cast
-      clientCertificate as io_bits.X509Certificate?,
+      clientCertificate: clientCertificate as io_bits.X509Certificate?,
+      // ignore: unnecessary_cast
+      remoteAddress: remoteAddress as io_bits.InternetAddress?,
+      errorHandler: _errorHandler,
     )..handle();
   }
 
   @Deprecated(
       'This is internal functionality, and will be removed in next major version.')
   void serveStream(ServerTransportStream stream) {
-    serveStream_(stream);
+    serveStream_(stream: stream);
   }
 
   Future<void> shutdown() async {

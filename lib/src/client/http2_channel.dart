@@ -32,14 +32,16 @@ class ClientChannel extends ClientChannelBase {
   final int port;
   final ChannelOptions options;
 
-  ClientChannel(this.host,
-      {this.port = 443, this.options = const ChannelOptions()})
-      : super();
+  ClientChannel(
+    this.host, {
+    this.port = 443,
+    this.options = const ChannelOptions(),
+    super.channelShutdownHandler,
+  });
 
   @override
-  ClientConnection createConnection() {
-    return Http2ClientConnection(host, port, options);
-  }
+  ClientConnection createConnection() =>
+      Http2ClientConnection(host, port, options);
 }
 
 class ClientTransportConnectorChannel extends ClientChannelBase {
@@ -50,8 +52,7 @@ class ClientTransportConnectorChannel extends ClientChannelBase {
       {this.options = const ChannelOptions()});
 
   @override
-  ClientConnection createConnection() {
-    return Http2ClientConnection.fromClientTransportConnector(
-        transportConnector, options);
-  }
+  ClientConnection createConnection() =>
+      Http2ClientConnection.fromClientTransportConnector(
+          transportConnector, options);
 }

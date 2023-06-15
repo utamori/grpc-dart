@@ -14,6 +14,7 @@
 // limitations under the License.
 
 import 'dart:async';
+import 'dart:developer';
 
 import '../shared/profiler.dart';
 import '../shared/status.dart';
@@ -39,6 +40,12 @@ abstract class ClientChannel {
   /// Initiates a new RPC on this connection.
   ClientCall<Q, R> createCall<Q, R>(
       ClientMethod<Q, R> method, Stream<Q> requests, CallOptions options);
+
+  /// Stream of connection state changes
+  ///
+  /// This returns a broadcast stream that can be listened to for connection changes.
+  /// Note: on web channels, this will not yield any values.
+  Stream<ConnectionState> get onConnectionStateChanged;
 }
 
 /// Auxiliary base class implementing much of ClientChannel.
@@ -47,8 +54,12 @@ abstract class ClientChannelBase implements ClientChannel {
   late ClientConnection _connection;
   var _connected = false;
   bool _isShutdown = false;
+  final StreamController<ConnectionState> _connectionStateStreamController =
+      StreamController.broadcast();
+  final void Function()? _channelShutdownHandler;
 
-  ClientChannelBase();
+  ClientChannelBase({void Function()? channelShutdownHandler})
+      : _channelShutdownHandler = channelShutdownHandler;
 
   @override
   Future<void> shutdown() async {
@@ -56,7 +67,9 @@ abstract class ClientChannelBase implements ClientChannel {
     _isShutdown = true;
     if (_connected) {
       await _connection.shutdown();
+      await _connectionStateStreamController.close();
     }
+    _channelShutdownHandler?.call();
   }
 
   @override
@@ -64,7 +77,9 @@ abstract class ClientChannelBase implements ClientChannel {
     _isShutdown = true;
     if (_connected) {
       await _connection.terminate();
+      await _connectionStateStreamController.close();
     }
+    _channelShutdownHandler?.call();
   }
 
   ClientConnection createConnection();
@@ -76,6 +91,12 @@ abstract class ClientChannelBase implements ClientChannel {
     if (_isShutdown) throw GrpcError.unavailable('Channel shutting down.');
     if (!_connected) {
       _connection = createConnection();
+      _connection.onStateChanged = (state) {
+        if (_connectionStateStreamController.isClosed) {
+          return;
+        }
+        _connectionStateStreamController.add(state);
+      };
       _connected = true;
     }
     return _connection;
@@ -89,7 +110,7 @@ abstract class ClientChannelBase implements ClientChannel {
         requests,
         options,
         isTimelineLoggingEnabled
-            ? timelineTaskFactory(filterKey: clientTimelineFilterKey)
+            ? TimelineTask(filterKey: clientTimelineFilterKey)
             : null);
     getConnection().then((connection) {
       if (call.isCancelled) return;
@@ -97,4 +118,8 @@ abstract class ClientChannelBase implements ClientChannel {
     }, onError: call.onConnectionError);
     return call;
   }
+
+  @override
+  Stream<ConnectionState> get onConnectionStateChanged =>
+      _connectionStateStreamController.stream;
 }

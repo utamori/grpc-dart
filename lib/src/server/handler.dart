@@ -20,7 +20,7 @@ import 'package:http2/transport.dart';
 
 import '../shared/codec.dart';
 import '../shared/codec_registry.dart';
-import '../shared/io_bits/io_bits.dart' show X509Certificate;
+import '../shared/io_bits/io_bits.dart' show InternetAddress, X509Certificate;
 import '../shared/message.dart';
 import '../shared/status.dart';
 import '../shared/streams.dart';
@@ -29,12 +29,16 @@ import 'call.dart';
 import 'interceptor.dart';
 import 'service.dart';
 
+typedef ServiceLookup = Service? Function(String service);
+typedef GrpcErrorHandler = void Function(GrpcError error, StackTrace? trace);
+
 /// Handles an incoming gRPC call.
-class ServerHandler_ extends ServiceCall {
+class ServerHandler extends ServiceCall {
   final ServerTransportStream _stream;
-  final Service? Function(String service) _serviceLookup;
+  final ServiceLookup _serviceLookup;
   final List<Interceptor> _interceptors;
   final CodecRegistry? _codecRegistry;
+  final GrpcErrorHandler? _errorHandler;
 
   // ignore: cancel_subscriptions
   StreamSubscription<GrpcMessage>? _incomingSubscription;
@@ -59,11 +63,25 @@ class ServerHandler_ extends ServiceCall {
   bool _isCanceled = false;
   bool _isTimedOut = false;
   Timer? _timeoutTimer;
-  final X509Certificate? _clientCertificate;
 
-  ServerHandler_(this._serviceLookup, this._stream, this._interceptors,
-      this._codecRegistry,
-      [this._clientCertificate]);
+  final X509Certificate? _clientCertificate;
+  final InternetAddress? _remoteAddress;
+
+  ServerHandler({
+    required ServerTransportStream stream,
+    required ServiceLookup serviceLookup,
+    required List<Interceptor> interceptors,
+    required CodecRegistry? codecRegistry,
+    X509Certificate? clientCertificate,
+    InternetAddress? remoteAddress,
+    GrpcErrorHandler? errorHandler,
+  })  : _stream = stream,
+        _serviceLookup = serviceLookup,
+        _interceptors = interceptors,
+        _codecRegistry = codecRegistry,
+        _clientCertificate = clientCertificate,
+        _remoteAddress = remoteAddress,
+        _errorHandler = errorHandler;
 
   @override
   DateTime? get deadline => _deadline;
@@ -86,14 +104,21 @@ class ServerHandler_ extends ServiceCall {
   @override
   X509Certificate? get clientCertificate => _clientCertificate;
 
+  @override
+  InternetAddress? get remoteAddress => _remoteAddress;
+
   void handle() {
     _stream.onTerminated = (_) => cancel();
 
     _incomingSubscription = _stream.incomingMessages
         .transform(GrpcHttpDecoder())
         .transform(grpcDecompressor(codecRegistry: _codecRegistry))
-        .listen(_onDataIdle,
-            onError: _onError, onDone: _onDoneError, cancelOnError: true);
+        .listen(
+          _onDataIdle,
+          onError: _onError,
+          onDone: _onDoneError,
+          cancelOnError: true,
+        );
     _stream.outgoingMessages.done.then((_) {
       cancel();
     });
@@ -251,15 +276,15 @@ class ServerHandler_ extends ServiceCall {
     }
 
     final data = message;
-    var request;
+    Object? request;
     try {
       request = _descriptor.deserialize(data.data);
-    } catch (error) {
+    } catch (error, trace) {
       final grpcError =
           GrpcError.internal('Error deserializing request: $error');
-      _sendError(grpcError);
+      _sendError(grpcError, trace);
       _requests!
-        ..addError(grpcError)
+        ..addError(grpcError, trace)
         ..close();
       return;
     }
@@ -276,7 +301,7 @@ class ServerHandler_ extends ServiceCall {
         sendHeaders();
       }
       _stream.sendData(frame(bytes, _callEncodingCodec));
-    } catch (error) {
+    } catch (error, trace) {
       final grpcError = GrpcError.internal('Error sending response: $error');
       if (!_requests!.isClosed) {
         // If we can, alert the handler that things are going wrong.
@@ -284,7 +309,7 @@ class ServerHandler_ extends ServiceCall {
           ..addError(grpcError)
           ..close();
       }
-      _sendError(grpcError);
+      _sendError(grpcError, trace);
       _cancelResponseSubscription();
     }
   }
@@ -293,11 +318,11 @@ class ServerHandler_ extends ServiceCall {
     sendTrailers();
   }
 
-  void _onResponseError(error) {
+  void _onResponseError(error, trace) {
     if (error is GrpcError) {
-      _sendError(error);
+      _sendError(error, trace);
     } else {
-      _sendError(GrpcError.unknown(error.toString()));
+      _sendError(GrpcError.unknown(error.toString()), trace);
     }
   }
 
@@ -328,7 +353,11 @@ class ServerHandler_ extends ServiceCall {
   }
 
   @override
-  void sendTrailers({int? status = 0, String? message}) {
+  void sendTrailers({
+    int? status = 0,
+    String? message,
+    Map<String, String>? errorTrailers,
+  }) {
     _timeoutTimer?.cancel();
 
     final outgoingTrailersMap = <String, String>{};
@@ -353,6 +382,9 @@ class ServerHandler_ extends ServiceCall {
     if (message != null) {
       outgoingTrailersMap['grpc-message'] =
           Uri.encodeFull(message).replaceAll('%20', ' ');
+    }
+    if (errorTrailers != null) {
+      outgoingTrailersMap.addAll(errorTrailers);
     }
 
     final outgoingTrailers = <Header>[];
@@ -406,8 +438,14 @@ class ServerHandler_ extends ServiceCall {
       ..onDone(_onDone);
   }
 
-  void _sendError(GrpcError error) {
-    sendTrailers(status: error.code, message: error.message);
+  void _sendError(GrpcError error, [StackTrace? trace]) {
+    _errorHandler?.call(error, trace);
+
+    sendTrailers(
+      status: error.code,
+      message: error.message,
+      errorTrailers: error.trailers,
+    );
   }
 
   void cancel() {
@@ -415,13 +453,4 @@ class ServerHandler_ extends ServiceCall {
     _timeoutTimer?.cancel();
     _cancelResponseSubscription();
   }
-}
-
-class ServerHandler extends ServerHandler_ {
-  ServerHandler(Service Function(String service) serviceLookup, stream,
-      [List<Interceptor> interceptors = const <Interceptor>[],
-      CodecRegistry? codecRegistry,
-      X509Certificate? clientCertificate])
-      : super(serviceLookup, stream, interceptors, codecRegistry,
-            clientCertificate);
 }
